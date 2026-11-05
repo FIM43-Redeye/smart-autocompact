@@ -1,0 +1,13 @@
+{
+  "name": "smart-autocompact",
+  "owner": {
+    "name": "FIM43-Redeye"
+  },
+  "plugins": [
+    {
+      "name": "smart-autocompact",
+      "source": "./"
+    }
+  ],
+  "description": "Claude records its state, then compacts its own context and carries on."
+}
