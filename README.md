@@ -74,7 +74,8 @@ At the prompt of a terminal session:
 /plugin install smart-autocompact --marketplace FIM43-Redeye/smart-autocompact
 ```
 
-Answer `y` to add the marketplace, then pick a scope.
+Answer `y` to add the marketplace, then pick a scope. User scope turns it on
+in every project on that computer.
 
 From a shell:
 
@@ -85,6 +86,47 @@ claude plugin install smart-autocompact --marketplace FIM43-Redeye/smart-autocom
 In the desktop app, where `/plugin` does not run: click + next to the prompt
 box, then Plugins, then Add marketplace with `FIM43-Redeye/smart-autocompact`,
 then Add plugin.
+
+The terminal, the desktop app's local sessions and the VS Code extension on
+one computer share their settings, so one install covers all three. Each
+computer needs its own install. Cloud sessions do not load installed plugins.
+
+## Updates
+
+The plugin sets no version, so the latest commit on `main` is its version and
+every push to `main` is an update.
+
+Claude Code does not auto-update a third-party marketplace until you turn it
+on, once per computer. In a terminal session, run `/plugin`, open the
+**Marketplaces** tab, select `smart-autocompact`, and choose **Enable
+auto-update**.
+
+Or put it in `~/.claude/settings.json`, which the desktop app reads too. The
+block also registers the marketplace and turns the plugin on, so the same
+lines set up any computer:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "smart-autocompact": {
+      "source": { "source": "github", "repo": "FIM43-Redeye/smart-autocompact" },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": {
+    "smart-autocompact@smart-autocompact": true
+  }
+}
+```
+
+With auto-update on, Claude Code checks a few minutes into a session (up to
+ten after your first message) and updates the copy on disk. The running
+session keeps the version it loaded: run `/reload-plugins` to switch, or the
+next session picks it up. To update right away:
+
+```bash
+claude plugin update smart-autocompact@smart-autocompact
+```
 
 ## Using it well
 
@@ -118,6 +160,18 @@ Claude can ask again.
 claude plugin test .
 claude plugin validate .
 ```
+
+`main` is what installed copies update from, so work goes on a branch first.
+To try a branch before merging it, check it out and start a terminal session
+on that copy. It replaces the installed plugin for that session only:
+
+```bash
+claude --plugin-dir /path/to/smart-autocompact
+```
+
+The desktop app takes no flags. There, set `CLAUDE_CODE_PLUGIN_DIRS` to the
+copy's absolute path in the `env` block of `~/.claude/settings.json` while
+you test, and take it out afterwards.
 
 ## License
 
