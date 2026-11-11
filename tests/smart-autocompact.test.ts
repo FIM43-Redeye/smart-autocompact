@@ -19,6 +19,10 @@ function engine(on: On, tokens: { now: number }, clock: { now: () => number }, a
   let isTurnRunning = false
   let isAbortHonored = true
   let traceText = ''
+  let isCommandRefused = false
+  let promptDrop: string | undefined
+  let skip: string | undefined
+  let breakdowns = 0
   on('fs.write', (_, e) => {
     if (e.path.endsWith('trace.log')) traceText = e.text
     return { value: undefined }
@@ -27,17 +31,21 @@ function engine(on: On, tokens: { now: number }, clock: { now: () => number }, a
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('tool.register', () => ({ value: undefined }))
   on('command.register', () => ({ value: { command: 'compact-status' } }))
-  on('session.usage', (_, e) => ({
+  on('session.usage', (_, e) => {
+    if (e.breakdown) breakdowns += 1
+    return usage(e.breakdown !== undefined)
+  })
+  const usage = (hasBreakdown: boolean) => ({
     value: {
       startedAt: 0,
       context: {
         tokens: tokens.now,
         window: 1_000_000,
-        ...(e.breakdown ? { breakdown: { autoCompactThreshold: autoCompactAt } as never } : {}),
+        ...(hasBreakdown ? { breakdown: { autoCompactThreshold: autoCompactAt } as never } : {}),
       },
       rateLimits: [],
     },
-  }))
+  })
   on('fs.stat', (_, e) => {
     const file = files.get(e.path)
     if (file === undefined) throw new Error(`ENOENT: ${e.path}`)
@@ -48,6 +56,8 @@ function engine(on: On, tokens: { now: number }, clock: { now: () => number }, a
   on('session.compact', (_, e) => {
     if (isTurnRunning) throw new Error('a turn is running')
     compactions.push({ instructions: e.instructions })
+    if (skip !== undefined) return { skip }
+    if (e.trigger === 'precompute') return { messages: [{ role: 'user' as const, text: 'summary', toolUses: [] }] }
     tokens.now = 40_000
     return { messages: [{ role: 'user' as const, text: 'summary', toolUses: [] }] }
   })
@@ -58,11 +68,15 @@ function engine(on: On, tokens: { now: number }, clock: { now: () => number }, a
     if (isAbortHonored) isTurnRunning = false
     return { value: undefined }
   })
-  on('command.run', (_, e) => {
+  on('command.run', (_, e, next) => {
+    // The test host has no way to reject with a reason: passing the call on
+    // with nothing beneath rejects it, as a refused command does.
+    if (isCommandRefused) return next(e)
     prompts.push(`/${e.command} ${e.args}`)
     return { text: '' }
   })
   on('prompt.submit', (_, e) => {
+    if (promptDrop !== undefined) return { drop: promptDrop }
     prompts.push(e.text)
     return { text: e.text }
   })
@@ -72,6 +86,21 @@ function engine(on: On, tokens: { now: number }, clock: { now: () => number }, a
     prompts,
     aborted,
     writeFile: (path: string, size = 2_000) => files.set(path, { size, mtimeMs: clock.now() }),
+    removeFile: (path: string) => files.delete(path),
+    // Queued commands are refused; queued prompts are dropped too when the
+    // refusal is a stop, as after the user's Esc. Until allowed again.
+    refuse: (isStop: boolean) => {
+      isCommandRefused = true
+      promptDrop = isStop ? 'the prompt was removed from the queue before it ran' : undefined
+    },
+    allow: () => {
+      isCommandRefused = false
+      promptDrop = undefined
+    },
+    skipCompactions: (reason: string) => {
+      skip = reason
+    },
+    breakdowns: () => breakdowns,
     stopTurn: () => {
       isTurnRunning = false
     },
@@ -99,6 +128,10 @@ async function endTurn($: Engine$, turnId: string, isAborted = false) {
 
 async function bash($: Engine$) {
   return $.tool.call({ tool: 'Bash', command: 'ls' })
+}
+
+async function status($: Engine$): Promise<string> {
+  return (await $.command.run({ command: 'compact-status', args: '' } as never)).text ?? ''
 }
 
 test('no notice below 300k tokens', async ($, on) => {
@@ -228,9 +261,13 @@ test('the queued /compact does not get the records twice, and clears the request
   await $.session.compact({ instructions: focus, messages: TRANSCRIPT } as never)
   expect(world.compactions[0]?.instructions).toBe(focus)
 
-  // Nothing pending any more: a later /compact is left as typed.
+  // Nothing pending any more: a later /compact keeps what was typed and names
+  // the records once, as the earlier state.
   await $.session.compact({ instructions: 'Plain.', messages: TRANSCRIPT } as never)
-  expect(world.compactions[1]?.instructions).toBe('Plain.')
+  const later = world.compactions[1]?.instructions ?? ''
+  expect(later.startsWith('Plain.')).toBe(true)
+  expect(later).toMatch(/earlier compaction/)
+  expect(later.split(PLAN).length).toBe(2)
 })
 
 test('a turn the user interrupts queues nothing', async ($, on) => {
@@ -382,3 +419,208 @@ test('with a 1M window, "start preparing" waits until 100k before the auto-compa
   expect(late).toMatch(/967k/)
 })
 
+
+// Standing instructions: written by Claude into the first record, each with
+// its scope and its end, so one meant for a single task is not carried along.
+test('the procedure asks for standing instructions with their scope and end, edited in place', async ($, on) => {
+  const clock = mock.clock(on)
+  engine(on, { now: 310_000 }, clock)
+  await start($)
+
+  const notice = (await bash($)).context?.join('\n') ?? ''
+  expect(notice).toMatch(/standing instructions/i)
+  expect(notice).toMatch(/quote the user's words/i)
+  expect(notice).toMatch(/when it ends/i)
+  expect(notice).toMatch(/never rewrite it/i)
+  expect(notice).toMatch(/take out any the user lifted/i)
+})
+
+// A compaction nobody prepared for still points at the last records.
+test('an unprepared compaction names the last prepared records as the earlier state', async ($, on) => {
+  const clock = mock.clock(on)
+  const world = engine(on, { now: 400_000 }, clock)
+  await start($)
+  world.writeFile(PLAN)
+  world.writeFile(MEMORY)
+
+  expect(await status($)).toMatch(/No prepared compaction yet/)
+  await $.tool.call({ tool: TOOL, records: [PLAN, MEMORY] })
+  await $.session.compact({ trigger: 'manual', messages: TRANSCRIPT } as never)
+  expect(await status($)).toMatch(new RegExp(`State last recorded .* in: ${PLAN}, ${MEMORY}`))
+
+  await $.session.compact({ trigger: 'auto', messages: TRANSCRIPT } as never)
+  const auto = world.compactions[1]?.instructions ?? ''
+  expect(auto).toContain(PLAN)
+  expect(auto).toContain(MEMORY)
+  expect(auto).toMatch(/predate the work since/)
+  expect(auto).not.toMatch(/the first as where to resume from/)
+})
+
+test('earlier records that are gone from disk are not named', async ($, on) => {
+  const clock = mock.clock(on)
+  const world = engine(on, { now: 400_000 }, clock)
+  await start($)
+  world.writeFile(PLAN)
+  world.writeFile(MEMORY)
+
+  await $.tool.call({ tool: TOOL, records: [PLAN, MEMORY] })
+  await $.session.compact({ trigger: 'manual', messages: TRANSCRIPT } as never)
+  world.removeFile(PLAN)
+  await $.session.compact({ trigger: 'auto', messages: TRANSCRIPT } as never)
+  expect(world.compactions[1]?.instructions).toContain(MEMORY)
+  expect(world.compactions[1]?.instructions).not.toContain(PLAN)
+
+  world.removeFile(MEMORY)
+  await $.session.compact({ trigger: 'auto', instructions: 'Plain.', messages: TRANSCRIPT } as never)
+  expect(world.compactions[2]?.instructions).toBe('Plain.')
+})
+
+test('a session with no prepared compaction leaves other compactions as they came', async ($, on) => {
+  const clock = mock.clock(on)
+  const world = engine(on, { now: 400_000 }, clock)
+  await start($)
+
+  await $.session.compact({ trigger: 'auto', messages: TRANSCRIPT } as never)
+  expect(world.compactions[0]?.instructions).toBeUndefined()
+})
+
+// A queued /compact that never runs must not leave the request stuck.
+test('a stop that drops /compact and the resume prompt leaves the request for the next turn end', async ($, on) => {
+  mock.env(on, { HOME: '/home/u' })
+  const clock = mock.clock(on)
+  const world = engine(on, { now: 400_000 }, clock)
+  await start($)
+  world.writeFile(PLAN)
+
+  await $.tool.call({ tool: TOOL, records: [PLAN], resume: 'Go on.' })
+  world.refuse(true)
+  await endTurn($, 't1')
+  await clock.settle()
+  expect(world.prompts).toEqual([])
+  expect(world.trace()).toMatch(/request left pending for the next turn end/)
+  expect(await status($)).toMatch(/Pending compaction/)
+
+  world.allow()
+  await endTurn($, 't2')
+  await clock.settle()
+  expect(world.prompts.length).toBe(2)
+  expect(world.prompts[0]).toMatch(/^\/compact /)
+  expect(world.prompts[1]).toContain('Go on.')
+})
+
+test('a refused /compact whose resume prompt went out drops the request, and the notices return', async ($, on) => {
+  mock.env(on, { HOME: '/home/u' })
+  const clock = mock.clock(on)
+  const tokens = { now: 350_000 }
+  const world = engine(on, tokens, clock)
+  await start($)
+  world.writeFile(PLAN)
+
+  await $.tool.call({ tool: TOOL, records: [PLAN] })
+  world.refuse(false)
+  await endTurn($, 't1')
+  await clock.settle()
+  expect(world.prompts.length).toBe(1)
+  expect(world.trace()).toMatch(/request dropped: the resume prompt went out without a compaction/)
+  expect(await status($)).toMatch(/No compaction pending/)
+
+  // The turn the resume prompt started ends: nothing is queued again.
+  world.allow()
+  await endTurn($, 't2')
+  await clock.settle()
+  expect(world.prompts.length).toBe(1)
+  tokens.now = 410_000
+  expect((await bash($)).context?.join('\n')).toMatch(/410k tokens/)
+})
+
+test('a queued compaction that is skipped drops the request', async ($, on) => {
+  mock.env(on, { HOME: '/home/u' })
+  const clock = mock.clock(on)
+  const world = engine(on, { now: 400_000 }, clock)
+  await start($)
+  world.writeFile(PLAN)
+
+  await $.tool.call({ tool: TOOL, records: [PLAN] })
+  await endTurn($, 't1')
+  await clock.settle()
+  world.skipCompactions('a PreCompact hook blocked it')
+  const focus = (world.prompts[0] ?? '').slice('/compact '.length)
+  await $.session.compact({ trigger: 'manual', instructions: focus, messages: TRANSCRIPT } as never)
+  expect(await status($)).toMatch(/No compaction pending/)
+  expect(await status($)).toMatch(/No prepared compaction yet/)
+  expect(world.trace()).toMatch(/compaction skipped, request dropped/)
+})
+
+test('a skipped compaction leaves a request that was not queued yet', async ($, on) => {
+  const clock = mock.clock(on)
+  const world = engine(on, { now: 400_000 }, clock)
+  await start($)
+  world.writeFile(PLAN)
+
+  await $.tool.call({ tool: TOOL, records: [PLAN] })
+  world.skipCompactions('not enough to compact')
+  await $.session.compact({ trigger: 'manual', messages: TRANSCRIPT } as never)
+  expect(await status($)).toMatch(/Pending compaction/)
+})
+
+test('a summary computed ahead of time names the records but clears nothing', async ($, on) => {
+  const clock = mock.clock(on)
+  const tokens = { now: 320_000 }
+  const world = engine(on, tokens, clock)
+  await start($)
+  world.writeFile(PLAN)
+
+  expect((await bash($)).context?.length).toBe(1)
+  await $.session.compact({ trigger: 'precompute', messages: TRANSCRIPT } as never)
+  tokens.now = 330_000
+  expect((await bash($)).context ?? []).toEqual([])
+
+  await $.tool.call({ tool: TOOL, records: [PLAN] })
+  await $.session.compact({ trigger: 'precompute', messages: TRANSCRIPT } as never)
+  expect(world.compactions[1]?.instructions).toContain(PLAN)
+  expect(await status($)).toMatch(/Pending compaction/)
+  expect(await status($)).toMatch(/No prepared compaction yet/)
+})
+
+// The marks follow the auto-compaction point, so a small window gets notices.
+test('with a 200k window the marks scale down: half the point, then a sixth per step', async ($, on) => {
+  const clock = mock.clock(on)
+  const tokens = { now: 80_000 }
+  engine(on, tokens, clock, 167_000)
+  await start($)
+
+  expect((await bash($)).context ?? []).toEqual([])
+
+  tokens.now = 85_000
+  const first = (await bash($)).context?.join('\n') ?? ''
+  expect(first).toMatch(/85k tokens/)
+  expect(first).not.toMatch(/preparing/i)
+
+  tokens.now = 100_000
+  expect((await bash($)).context ?? []).toEqual([])
+
+  tokens.now = 113_000
+  expect((await bash($)).context?.join('\n')).toMatch(/113k tokens/)
+
+  tokens.now = 141_000
+  const last = (await bash($)).context?.join('\n') ?? ''
+  expect(last).toMatch(/start preparing to compact now/i)
+  expect(last).toMatch(/167k/)
+})
+
+test('the auto-compaction point is read once for many tool calls, and again after a compaction', async ($, on) => {
+  const clock = mock.clock(on)
+  const world = engine(on, { now: 120_000 }, clock)
+  await start($)
+
+  for (let i = 0; i < 5; i += 1) await bash($)
+  expect(world.breakdowns()).toBe(1)
+
+  await clock.advance(6 * MINUTE)
+  await bash($)
+  expect(world.breakdowns()).toBe(2)
+
+  await $.session.compact({ trigger: 'auto', messages: TRANSCRIPT } as never)
+  await bash($)
+  expect(world.breakdowns()).toBe(3)
+})

@@ -1,20 +1,29 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { SelfCompactPending } from '../types'
+import type { SelfCompactPending, SelfCompactRecorded, SelfCompactThreshold } from '../types'
 
 const TOOL_NAME = 'compact_context'
 const TOOL = `mcp__smart-autocompact__${TOOL_NAME}`
 const COMMAND = 'compact-status'
 
-// Context marks: the first notice at FIRST_MARK and one more per STEP. From
-// one STEP short of the auto-compaction point on, the notice says to start
-// recording now, so the state is written down before auto-compaction forces a
-// summary that cannot use tools. The point follows the session's
-// autoCompactWindow; FALLBACK_PREPARE_MARK stands in when it cannot be read.
+// Context marks: the first notice at the first mark and one more per step.
+// From one step short of the auto-compaction point on, the notice says to
+// start recording now, so the state is written down before auto-compaction
+// forces a summary that cannot use tools. The marks follow the session's
+// auto-compaction point (half of it, then a sixth of it per step), so a small
+// window gets its notices too, and are capped at FIRST_MARK and STEP so a
+// large one does not get them later. When the point cannot be read, the caps
+// are the marks and FALLBACK_PREPARE_MARK stands in for the last one.
 const FIRST_MARK = 300_000
 const STEP = 100_000
 const FALLBACK_PREPARE_MARK = 500_000
+const FIRST_SHARE = 1 / 2
+const STEP_SHARE = 1 / 6
+
+// The auto-compaction point is read with a usage breakdown, so it is kept for
+// a while instead of read on every tool call; a compaction drops it.
+const THRESHOLD_MS = 5 * 60_000
 
 // At least one record must have been written for this compaction; the
 // others may be older documents it points at.
@@ -31,6 +40,8 @@ const TRACE_LINES = 200
 
 const pending = atom({ plugin: 'smart-autocompact', key: 'pending' } as const, null as SelfCompactPending | null)
 const lastMark = atom({ plugin: 'smart-autocompact', key: 'lastMark' } as const, 0)
+const lastRecorded = atom({ plugin: 'smart-autocompact', key: 'lastRecorded' } as const, null as SelfCompactRecorded | null)
+const threshold = atom({ plugin: 'smart-autocompact', key: 'threshold' } as const, null as SelfCompactThreshold | null)
 
 // Subagents. The mod serves the main conversation alone. A subagent cannot
 // start its own compaction ($.session.compact acts on the main conversation
@@ -55,9 +66,10 @@ async function trace($: EngineInterface, line: string): Promise<void> {
 }
 
 const PROCEDURE = `Record first, then compact. Compaction keeps only a model-written summary, so anything you have not written down is lost:
-1. Write the state down where it belongs (never /tmp): plan and status docs, memory, findings, notes; commit finished work. What a fresh context needs: the task and where it stands, decisions and why, work in flight, standing constraints, open questions for the user, the next step.
-2. Use a dedicated handoff file only when the state has no natural home or is scattered across many places; otherwise the updated documents are the record.
-3. Call ${TOOL} with those files' paths, the one to start reading from first, as your last action.`
+1. Write the state down where it belongs (never /tmp): plan and status docs, memory, findings, notes; commit finished work. What a fresh context needs: the task and where it stands, decisions and why, work in flight, open questions for the user, the next step, and the user's standing instructions.
+2. Standing instructions are what the user told you that still governs the work ahead ("don't touch the auth module", "ask before pushing"). A summary tends to drop them, so keep them as a list in the record you will name first: quote the user's words, and note what each applies to and when it ends (this task, this session, always). Edit that list, never rewrite it from memory: add new ones, and take out any the user lifted or whose task is done, so an instruction meant for one task does not follow the whole session. One that should outlast the session also belongs in memory or CLAUDE.md.
+3. Use a dedicated handoff file only when the state has no natural home or is scattered across many places; otherwise the updated documents are the record.
+4. Call ${TOOL} with those files' paths, the one to start reading from first, as your last action.`
 
 const TOOL_DESCRIPTION = `Compact this conversation's context once you have recorded its state.
 
@@ -71,25 +83,33 @@ Main conversation only. A subagent never calls this: its context compacts itself
 - instructions (optional): anything else the summary itself must keep.
 - resume (optional): a note added to the resume prompt, such as the next step. A resume prompt follows every compaction, as after auto-compaction: it tells you to read the first record and carry on where you left off, or, if the work was waiting on the user, to ask again and end the turn.
 
-When: you get a notice as the context passes 300k tokens and every 100k after. If the user is driving, ask them first. If you are working autonomously, do it at the next natural break. From 100k short of the auto-compaction point on (the notice names it), start preparing now: auto-compaction forces a tool-less summary.`
+When: notices arrive as the context grows, the first at half the auto-compaction point (at 300k tokens at the latest), then at regular steps. If the user is driving, ask them first. If you are working autonomously, do it at the next natural break. From the last step before the auto-compaction point on (the notice names it), start preparing now: auto-compaction forces a tool-less summary.`
 
 function k(tokens: number): string {
   return `${Math.round(tokens / 1000)}k`
 }
 
-function prepareMarkFor(autoCompactAt?: number): number {
-  return autoCompactAt === undefined ? FALLBACK_PREPARE_MARK : autoCompactAt - STEP
+function roundK(tokens: number): number {
+  return Math.max(1_000, Math.round(tokens / 1_000) * 1_000)
 }
 
-export function markFor(tokens: number): number {
-  return tokens < FIRST_MARK ? 0 : Math.floor(tokens / STEP) * STEP
+// Where the notices fall for a session that auto-compacts at autoCompactAt.
+export function marksFor(autoCompactAt?: number): { first: number; step: number; prepare: number } {
+  if (autoCompactAt === undefined) return { first: FIRST_MARK, step: STEP, prepare: FALLBACK_PREPARE_MARK }
+  const step = Math.min(STEP, roundK(autoCompactAt * STEP_SHARE))
+  return { first: Math.min(FIRST_MARK, roundK(autoCompactAt * FIRST_SHARE)), step, prepare: autoCompactAt - step }
+}
+
+export function markFor(tokens: number, autoCompactAt?: number): number {
+  const { first, step } = marksFor(autoCompactAt)
+  return tokens < first ? 0 : first + Math.floor((tokens - first) / step) * step
 }
 
 export function noticeFor(tokens: number, autoCompactAt?: number): string {
   const head = `[smart-autocompact] Context is at ${k(tokens)} tokens.`
   const forced = autoCompactAt === undefined ? '' : ` Auto-compaction forces a summary at ${k(autoCompactAt)}, and it cannot record anything.`
   const when =
-    tokens >= prepareMarkFor(autoCompactAt)
+    tokens >= marksFor(autoCompactAt).prepare
       ? `Start preparing to compact now: finish this step, record the state, and compact.${forced}`
       : 'At the next natural break (ask the user first if they are driving):'
   return `${head} ${when}\n${PROCEDURE}`
@@ -100,6 +120,17 @@ function summaryInstructions(request: SelfCompactPending, extra?: string): strin
     extra,
     `This session's state is recorded in: ${request.records.join(', ')}. Name these paths in the summary, the first as where to resume from.`,
     request.instructions,
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+// For a compaction nobody prepared for: the summary still says where the state
+// was last written down, and that it is older than the work since.
+function earlierInstructions(records: string[], extra?: string): string {
+  return [
+    extra,
+    `Before an earlier compaction, this session's state was recorded in: ${records.join(', ')}. Name these paths in the summary as where that earlier state is written down, and say that they predate the work since, so for anything later the summary is the newer account.`,
   ]
     .filter(Boolean)
     .join('\n\n')
@@ -120,9 +151,27 @@ async function contextTokens($: EngineInterface): Promise<number | undefined> {
   return (await $.session.usage()).context.tokens
 }
 
-// The summary breakdown is estimated locally: no API request.
+// The summary breakdown is estimated locally: no API request. Kept for
+// THRESHOLD_MS, so most tool calls cost no breakdown.
 async function autoCompactThreshold($: EngineInterface): Promise<number | undefined> {
-  return (await $.session.usage({ breakdown: 'summary' })).context.breakdown?.autoCompactThreshold
+  const now = await $.clock.now()
+  const kept = await read($, threshold)
+  if (kept !== null && now - kept.at < THRESHOLD_MS) return kept.tokens
+  const tokens = (await $.session.usage({ breakdown: 'summary' })).context.breakdown?.autoCompactThreshold
+  await update($, threshold, () => ({ ...(tokens === undefined ? {} : { tokens }), at: now }))
+  return tokens
+}
+
+// The records of the last prepared compaction that are still on disk.
+async function earlierRecords($: EngineInterface): Promise<string[]> {
+  const recorded = await read($, lastRecorded)
+  if (recorded === null) return []
+  const found: string[] = []
+  for (const path of recorded.records) {
+    const stat = await $.fs.stat(path).catch(() => undefined)
+    if (stat !== undefined && stat.kind === 'file' && stat.size > 0) found.push(path)
+  }
+  return found
 }
 
 // Why these records can't be used yet, or undefined when they can.
@@ -142,14 +191,40 @@ async function recordsProblem($: EngineInterface, paths: string[]): Promise<stri
   return undefined
 }
 
-async function queue($: EngineInterface, label: string, call: () => Promise<unknown>): Promise<void> {
-  try {
-    await call()
-    await trace($, `${label} ran`)
-  } catch (err) {
-    await trace($, `${label} refused: ${String(err)}`)
-    $.ui.toast(`smart-autocompact: ${label} was refused (${String(err)})`)
+// Runs the queued /compact and the resume prompt behind it. A /compact the
+// engine refused must not leave its request marked as queued: no compaction
+// will clear it, and a pending request silences the notices. What to do turns
+// on the resume prompt:
+// - it never entered (the user stopped the session, which drops queued work):
+//   no turn follows, so the request waits for the next turn end;
+// - it entered: a turn is running on it, and queueing again when that turn
+//   ends could go round for ever, so the request is dropped.
+// A /compact that ran is settled by the session.compact hook.
+async function runQueued($: EngineInterface, focus: string, prompt: string): Promise<void> {
+  const compact = $.command.run({ command: 'compact', args: focus }).then(
+    () => undefined,
+    (err: unknown) => String(err),
+  )
+  const resume = $.prompt.submit({ text: prompt }).then(
+    entered => entered.drop,
+    (err: unknown) => String(err),
+  )
+  const [refused, dropped] = await Promise.all([compact, resume])
+  await trace($, refused === undefined ? '/compact ran' : `/compact refused: ${refused}`)
+  await trace($, dropped === undefined ? 'resume prompt ran' : `resume prompt dropped: ${dropped}`)
+  if (refused === undefined) return
+  $.ui.toast(`smart-autocompact: /compact did not run (${refused})`)
+
+  const request = await read($, pending)
+  if (request === null || !request.isQueued) return
+  if (dropped === undefined) {
+    await update($, pending, () => null)
+    await trace($, 'request dropped: the resume prompt went out without a compaction')
+    return
   }
+  const { isQueued: _, ...waiting } = request
+  await update($, pending, () => waiting)
+  await trace($, 'request left pending for the next turn end')
 }
 
 function text(value: unknown): string | undefined {
@@ -219,10 +294,10 @@ export const register: Register = on => {
     if ((await read($, pending)) !== null) return ran
     const tokens = await contextTokens($)
     if (tokens === undefined) return ran
-    const mark = markFor(tokens)
+    const autoCompactAt = await autoCompactThreshold($)
+    const mark = markFor(tokens, autoCompactAt)
     if (mark === 0 || mark <= (await read($, lastMark))) return ran
     await update($, lastMark, () => mark)
-    const autoCompactAt = await autoCompactThreshold($)
     return { ...ran, context: [...(ran.context ?? []), noticeFor(tokens, autoCompactAt)] }
   })
 
@@ -239,29 +314,49 @@ export const register: Register = on => {
     // One line: a command's arguments end at the first newline. Not awaited:
     // a submission resolves only when its turn starts, after this hook.
     const focus = summaryInstructions(request).replace(/\s*\n+\s*/g, ' ')
-    void queue($, '/compact', () => $.command.run({ command: 'compact', args: focus }))
-    const prompt = resumePrompt(request)
-    void queue($, 'resume prompt', () => $.prompt.submit({ text: prompt }))
+    void runQueued($, focus, resumePrompt(request))
     await trace($, `turn ${e.turnId} ended: queued /compact and the resume prompt`)
     return ended
   })
 
   // Any other compaction (the user's /compact, the auto threshold) still names
-  // the pending records, and resets the marks.
+  // the pending records, and resets the marks. With nothing pending it names
+  // the records of the last prepared compaction, as older than the work since.
   // A subagent's compaction is the engine's own and passes through untouched.
   on('session.compact', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
-    const request = e.trigger === 'plugin' ? null : await read($, pending)
-    const instructions =
-      request && !(e.instructions ?? '').includes(request.records[0] ?? '')
-        ? summaryInstructions(request, e.instructions)
-        : e.instructions
-    const done = await next({ ...e, instructions })
-    if (!('skip' in done && done.skip !== undefined)) {
-      await update($, lastMark, () => 0)
-      await update($, pending, () => null)
-      await trace($, `compacted (${e.trigger})`)
+    const waiting = await read($, pending)
+    const request = e.trigger === 'plugin' ? null : waiting
+    const given = e.instructions ?? ''
+    let instructions = e.instructions
+    if (request) {
+      if (!given.includes(request.records[0] ?? '')) instructions = summaryInstructions(request, e.instructions)
+    } else if (waiting === null) {
+      const earlier = await earlierRecords($)
+      if (earlier[0] !== undefined && !given.includes(earlier[0])) instructions = earlierInstructions(earlier, e.instructions)
     }
+    const done = await next({ ...e, instructions })
+    // Computed ahead of time, installed by a later compaction: nothing has
+    // been compacted yet, so the request and the marks stand either way.
+    if (e.trigger === 'precompute') return done
+    if ('skip' in done && done.skip !== undefined) {
+      // Skipped after /compact was queued for it: nothing else would clear the
+      // request, and the resume prompt behind it has gone out already.
+      if (waiting?.isQueued) {
+        await update($, pending, () => null)
+        await trace($, `compaction skipped, request dropped: ${done.skip}`)
+        $.ui.toast(`smart-autocompact: the compaction was skipped (${done.skip})`)
+      }
+      return done
+    }
+    if (waiting !== null) {
+      const at = await $.clock.now()
+      await update($, lastRecorded, () => ({ records: waiting.records, at }))
+    }
+    await update($, lastMark, () => 0)
+    await update($, pending, () => null)
+    await update($, threshold, () => null)
+    await trace($, `compacted (${e.trigger})`)
     return done
   })
 
@@ -270,6 +365,7 @@ export const register: Register = on => {
     const autoCompactAt = await autoCompactThreshold($)
     const mark = await read($, lastMark)
     const request = await read($, pending)
+    const recorded = await read($, lastRecorded)
     const lines = [
       `Context: ${tokens === undefined ? 'unknown' : `${k(tokens)} tokens`}.`,
       `Auto-compaction: ${autoCompactAt === undefined ? 'off' : `at ${k(autoCompactAt)}`}.`,
@@ -277,6 +373,9 @@ export const register: Register = on => {
       request
         ? `Pending compaction, records: ${request.records.join(', ')}.`
         : 'No compaction pending.',
+      recorded
+        ? `State last recorded (${new Date(recorded.at).toISOString()}) in: ${recorded.records.join(', ')}.`
+        : 'No prepared compaction yet this session.',
     ]
     return { text: lines.join('\n') }
   })

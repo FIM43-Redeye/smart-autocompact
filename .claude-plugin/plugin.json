@@ -1,7 +1,7 @@
 {
   "name": "smart-autocompact",
-  "version": "0.1.0",
-  "description": "Lets Claude write its state to files, then compact its own context and carry on; context-size notices from 300k tokens; main conversation only, silent to subagents",
+  "version": "0.2.0",
+  "description": "Lets Claude write its state to files, then compact its own context and carry on; context-size notices that follow the auto-compaction point; main conversation only, silent to subagents",
   "author": { "name": "FIM43-Redeye" },
   "license": "MIT",
   "types": "./types/index.d.ts"

@@ -9,12 +9,31 @@ export type SelfCompactPending = {
   isQueued?: true
 }
 
+// The records of the last compaction Claude prepared, kept so a later
+// compaction nobody prepared for can still point back at them.
+export type SelfCompactRecorded = {
+  records: string[]
+  // When that compaction ran, in ms since the epoch.
+  at: number
+}
+
+// The session's auto-compaction point as last read, so the marks can follow
+// it without a usage breakdown on every tool call.
+export type SelfCompactThreshold = {
+  // Absent when auto-compaction is off or the point could not be read.
+  tokens?: number
+  // When it was read, in ms since the epoch.
+  at: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'smart-autocompact': {
       pending: SelfCompactPending | null
       // The highest context mark (in tokens) already announced; 0 after a compaction.
       lastMark: number
+      lastRecorded: SelfCompactRecorded | null
+      threshold: SelfCompactThreshold | null
     }
   }
 }
