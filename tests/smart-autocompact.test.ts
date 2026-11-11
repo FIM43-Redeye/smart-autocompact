@@ -425,37 +425,39 @@ test('with a 1M window, "start preparing" waits until 100k before the auto-compa
 })
 
 
-// What the user said is kept at the strength they said it: requirements and
-// remarks apart, so a passing remark does not come back as a rule.
-test('the notice asks for what the user said at the strength they said it', async ($, on) => {
+// What the user said is kept at the strength they meant it, as Claude judges
+// it, so a passing thought does not come back as a rule.
+test('the notice asks for what the user said at the strength they meant it', async ($, on) => {
   const clock = mock.clock(on)
   engine(on, { now: 310_000 }, clock)
   await start($)
 
   const notice = (await bash($)).context?.join('\n') ?? ''
-  expect(notice).toMatch(/at the strength they said it/i)
-  expect(notice).toMatch(/requirements and remarks apart/i)
+  expect(notice).toMatch(/at the strength they meant it/i)
   expect(notice).toMatch(/their words quoted/i)
+  expect(notice).toMatch(/how firm you take each to be/i)
   expect(notice).toMatch(/edited and never rewritten/i)
 })
 
-test('the tool description keeps requirements and remarks apart, and says when to ask the user', async ($, on) => {
+test('the tool description leaves the firmness to Claude, which can ask the user', async ($, on) => {
   const clock = mock.clock(on)
   const world = engine(on, { now: 100_000 }, clock)
   await start($)
 
   const description = world.toolDescription()
-  expect(description).toMatch(/Requirements: what the user set out as having to hold, or confirmed/)
+  expect(description).toMatch(/in their own words, each with how firmly you understand them to have meant it/)
+  expect(description).toMatch(/That is your judgment/)
+  expect(description).toMatch(/not from tone alone/)
+  expect(description).toMatch(/Where they left something open, keep it open/)
   expect(description).toMatch(/when it ends \(this task, this session, always\)/)
-  expect(description).toMatch(/Remarks: leanings, half-formed thoughts/)
-  expect(description).toMatch(/Keep the words and the doubt in them/)
-  expect(description).toMatch(/A remark stays a remark until the user makes it a requirement/)
+  expect(description).toMatch(/You can always ask/)
+  expect(description).toMatch(/carry on with your best reading/)
   expect(description).toMatch(/take out what the user lifted or what belonged to a finished task/)
-  expect(description).toMatch(/ask them to set out their requirements/)
-  expect(description).toMatch(/show them the list so they can correct it/)
+  // No fixed rule about what may count as a requirement.
+  expect(description).not.toMatch(/stays a remark/)
 })
 
-test('the summary is told to keep how firmly the user said things', async ($, on) => {
+test('the summary is told to keep how firmly the user meant things', async ($, on) => {
   const clock = mock.clock(on)
   const world = engine(on, { now: 400_000 }, clock)
   await start($)
@@ -464,7 +466,7 @@ test('the summary is told to keep how firmly the user said things', async ($, on
   await $.tool.call({ tool: TOOL, records: [PLAN] })
   await endTurn($, 't1')
   await clock.settle()
-  expect(world.prompts[0]).toMatch(/a remark is not a requirement/)
+  expect(world.prompts[0]).toMatch(/without hardening a passing thought into a rule/)
   expect(world.prompts[0]).toContain(`The list in ${PLAN} is the authority`)
 })
 

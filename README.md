@@ -19,21 +19,17 @@ This mod changes the order: record first, then compact.
   refuses paths that don't exist or are empty. It also requires at least one
   of them to have changed in the last 30 minutes, so Claude can't hand over
   stale notes.
-- **What you said, at the strength you said it.** A summary flattens what
+- **What you said, at the strength you meant it.** A summary flattens what
   you told Claude along the way: a requirement gets dropped, or a passing
-  remark hardens into a rule. The procedure has Claude keep a list in the
-  first record, in two parts, each entry with your words quoted:
-  - *Requirements*: what you set out as having to hold, or confirmed when
-    asked, with what each applies to and when it ends.
-  - *Remarks*: leanings and half-formed thoughts, kept with their doubt, and
-    Claude's reading marked as a reading. A remark stays a remark until you
-    make it a requirement. When the work turns on one, Claude asks you; when
-    you are away, it goes under open questions.
-
-  Claude edits the list instead of rewriting it, and takes out what you
-  lifted or what belonged to a finished task. Before you leave it to work on
-  its own, it asks you to set out your requirements if they are not clear;
-  when you are driving, it shows you the list before compacting.
+  thought hardens into a rule. The procedure has Claude keep a list in the
+  first record of what you said about how the work should go, in your own
+  words, each with how firmly it understands you to have meant it: something
+  that has to hold, a preference, a thought you were still turning over. That
+  judgment is Claude's to make, and not from tone alone. Where you left
+  something open, it stays open. When Claude is unsure and the work turns on
+  it, it can ask you; if you are away, it notes an open question and carries
+  on with its best reading. Claude edits the list instead of rewriting it,
+  and takes out what you lifted or what belonged to a finished task.
 - **Compaction at the turn boundary.** When the turn ends, the mod runs
   `/compact` with summary instructions that name the record files.
 - **Then it keeps going.** A resume prompt follows every compaction: read the

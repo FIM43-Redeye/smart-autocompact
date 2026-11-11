@@ -67,7 +67,7 @@ async function trace($: EngineInterface, line: string): Promise<void> {
 
 const PROCEDURE = `Record first, then compact. Compaction keeps only a model-written summary, so anything you have not written down is lost:
 1. Write the state down where it belongs (never /tmp): plan and status docs, memory, findings, notes; commit finished work. What a fresh context needs: the task and where it stands, decisions and why, work in flight, open questions for the user, the next step, and what the user said about how the work should go.
-2. Keep what the user said at the strength they said it: requirements and remarks apart in the record you will name first, their words quoted, the list edited and never rewritten ("What the user said" in the ${TOOL} description has the details).
+2. Keep what the user said at the strength they meant it: in the record you will name first, their words quoted, how firm you take each to be, the list edited and never rewritten ("What the user said" in the ${TOOL} description has the details).
 3. Use a dedicated handoff file only when the state has no natural home or is scattered across many places; otherwise the updated documents are the record.
 4. Call ${TOOL} with those files' paths, the one to start reading from first, as your last action.`
 
@@ -79,11 +79,9 @@ The tool refuses records that do not exist or are empty, and wants at least one 
 
 Main conversation only. A subagent never calls this: its context compacts itself when it fills, and ending its turn would hand its report back unfinished.
 
-What the user said. A summary flattens it: a requirement gets dropped, or a passing remark hardens into a rule. So the record you name first keeps a list in two parts, every entry with the user's own words quoted:
-- Requirements: what the user set out as having to hold, or confirmed when you asked. Note what each applies to and when it ends (this task, this session, always).
-- Remarks: leanings, half-formed thoughts, things said in passing. Keep the words and the doubt in them, and add your reading marked as your reading. A remark stays a remark until the user makes it a requirement: when the work turns on one, ask them; when they are away, put it under open questions and take the reading that is easiest to undo.
-Edit the list, never rewrite it from memory: add to it, and take out what the user lifted or what belonged to a finished task, so nothing meant for one task follows the whole session. A requirement that should outlast the session also belongs in memory or CLAUDE.md.
-Before the user leaves you to work on your own, if what must hold is not clear, ask them to set out their requirements. When they are driving and you ask before compacting, show them the list so they can correct it.
+What the user said. A summary flattens it: a requirement gets dropped, or a passing thought hardens into a rule. So the record you name first keeps a list of what the user said about how the work should go, in their own words, each with how firmly you understand them to have meant it: something that has to hold, a preference, a thought they were still turning over. That is your judgment, made from everything you know of them and the work and not from tone alone: a light aside can be firm, and a confident sentence can be thinking aloud. Where they left something open, keep it open and say what your reading is. Note what each applies to and when it ends (this task, this session, always).
+You can always ask. When you are unsure how something was meant and the work turns on it, ask the user; before a long stretch on your own is a good moment, and so is before compacting while they are driving. If they are away, put it under open questions and carry on with your best reading.
+Edit the list, never rewrite it from memory: add to it, and take out what the user lifted or what belonged to a finished task, so nothing meant for one task follows the whole session. What should outlast the session also belongs in memory or CLAUDE.md.
 
 - records: absolute paths of the files holding the state, the starting point first.
 - instructions (optional): anything else the summary itself must keep.
@@ -125,7 +123,7 @@ function summaryInstructions(request: SelfCompactPending, extra?: string): strin
   return [
     extra,
     `This session's state is recorded in: ${request.records.join(', ')}. Name these paths in the summary, the first as where to resume from.`,
-    `Where the summary says what the user asked for, keep their wording and how firmly they said it: a remark is not a requirement. The list in ${request.records[0]} is the authority on both.`,
+    `Where the summary says what the user asked for, keep their wording and how firmly they meant it, without hardening a passing thought into a rule. The list in ${request.records[0]} is the authority on both.`,
     request.instructions,
   ]
     .filter(Boolean)
