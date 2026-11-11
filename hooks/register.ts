@@ -66,8 +66,8 @@ async function trace($: EngineInterface, line: string): Promise<void> {
 }
 
 const PROCEDURE = `Record first, then compact. Compaction keeps only a model-written summary, so anything you have not written down is lost:
-1. Write the state down where it belongs (never /tmp): plan and status docs, memory, findings, notes; commit finished work. What a fresh context needs: the task and where it stands, decisions and why, work in flight, open questions for the user, the next step, and the user's standing instructions.
-2. Standing instructions are what the user told you that still governs the work ahead ("don't touch the auth module", "ask before pushing"). A summary tends to drop them, so keep them as a list in the record you will name first: quote the user's words, and note what each applies to and when it ends (this task, this session, always). Edit that list, never rewrite it from memory: add new ones, and take out any the user lifted or whose task is done, so an instruction meant for one task does not follow the whole session. One that should outlast the session also belongs in memory or CLAUDE.md.
+1. Write the state down where it belongs (never /tmp): plan and status docs, memory, findings, notes; commit finished work. What a fresh context needs: the task and where it stands, decisions and why, work in flight, open questions for the user, the next step, and what the user said about how the work should go.
+2. Keep what the user said at the strength they said it: requirements and remarks apart in the record you will name first, their words quoted, the list edited and never rewritten ("What the user said" in the ${TOOL} description has the details).
 3. Use a dedicated handoff file only when the state has no natural home or is scattered across many places; otherwise the updated documents are the record.
 4. Call ${TOOL} with those files' paths, the one to start reading from first, as your last action.`
 
@@ -78,6 +78,12 @@ ${PROCEDURE}
 The tool refuses records that do not exist or are empty, and wants at least one changed in the last 30 minutes. Calling it ends your turn, then compacts, so make it your last action; the summary is told to name the records.
 
 Main conversation only. A subagent never calls this: its context compacts itself when it fills, and ending its turn would hand its report back unfinished.
+
+What the user said. A summary flattens it: a requirement gets dropped, or a passing remark hardens into a rule. So the record you name first keeps a list in two parts, every entry with the user's own words quoted:
+- Requirements: what the user set out as having to hold, or confirmed when you asked. Note what each applies to and when it ends (this task, this session, always).
+- Remarks: leanings, half-formed thoughts, things said in passing. Keep the words and the doubt in them, and add your reading marked as your reading. A remark stays a remark until the user makes it a requirement: when the work turns on one, ask them; when they are away, put it under open questions and take the reading that is easiest to undo.
+Edit the list, never rewrite it from memory: add to it, and take out what the user lifted or what belonged to a finished task, so nothing meant for one task follows the whole session. A requirement that should outlast the session also belongs in memory or CLAUDE.md.
+Before the user leaves you to work on your own, if what must hold is not clear, ask them to set out their requirements. When they are driving and you ask before compacting, show them the list so they can correct it.
 
 - records: absolute paths of the files holding the state, the starting point first.
 - instructions (optional): anything else the summary itself must keep.
@@ -119,6 +125,7 @@ function summaryInstructions(request: SelfCompactPending, extra?: string): strin
   return [
     extra,
     `This session's state is recorded in: ${request.records.join(', ')}. Name these paths in the summary, the first as where to resume from.`,
+    `Where the summary says what the user asked for, keep their wording and how firmly they said it: a remark is not a requirement. The list in ${request.records[0]} is the authority on both.`,
     request.instructions,
   ]
     .filter(Boolean)

@@ -23,13 +23,17 @@ function engine(on: On, tokens: { now: number }, clock: { now: () => number }, a
   let promptDrop: string | undefined
   let skip: string | undefined
   let breakdowns = 0
+  let toolDescription = ''
   on('fs.write', (_, e) => {
     if (e.path.endsWith('trace.log')) traceText = e.text
     return { value: undefined }
   })
 
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('tool.register', () => ({ value: undefined }))
+  on('tool.register', (_, e) => {
+    toolDescription = (e as unknown as { description: string }).description
+    return { value: undefined } as never
+  })
   on('command.register', () => ({ value: { command: 'compact-status' } }))
   on('session.usage', (_, e) => {
     if (e.breakdown) breakdowns += 1
@@ -101,6 +105,7 @@ function engine(on: On, tokens: { now: number }, clock: { now: () => number }, a
       skip = reason
     },
     breakdowns: () => breakdowns,
+    toolDescription: () => toolDescription,
     stopTurn: () => {
       isTurnRunning = false
     },
@@ -420,19 +425,47 @@ test('with a 1M window, "start preparing" waits until 100k before the auto-compa
 })
 
 
-// Standing instructions: written by Claude into the first record, each with
-// its scope and its end, so one meant for a single task is not carried along.
-test('the procedure asks for standing instructions with their scope and end, edited in place', async ($, on) => {
+// What the user said is kept at the strength they said it: requirements and
+// remarks apart, so a passing remark does not come back as a rule.
+test('the notice asks for what the user said at the strength they said it', async ($, on) => {
   const clock = mock.clock(on)
   engine(on, { now: 310_000 }, clock)
   await start($)
 
   const notice = (await bash($)).context?.join('\n') ?? ''
-  expect(notice).toMatch(/standing instructions/i)
-  expect(notice).toMatch(/quote the user's words/i)
-  expect(notice).toMatch(/when it ends/i)
-  expect(notice).toMatch(/never rewrite it/i)
-  expect(notice).toMatch(/take out any the user lifted/i)
+  expect(notice).toMatch(/at the strength they said it/i)
+  expect(notice).toMatch(/requirements and remarks apart/i)
+  expect(notice).toMatch(/their words quoted/i)
+  expect(notice).toMatch(/edited and never rewritten/i)
+})
+
+test('the tool description keeps requirements and remarks apart, and says when to ask the user', async ($, on) => {
+  const clock = mock.clock(on)
+  const world = engine(on, { now: 100_000 }, clock)
+  await start($)
+
+  const description = world.toolDescription()
+  expect(description).toMatch(/Requirements: what the user set out as having to hold, or confirmed/)
+  expect(description).toMatch(/when it ends \(this task, this session, always\)/)
+  expect(description).toMatch(/Remarks: leanings, half-formed thoughts/)
+  expect(description).toMatch(/Keep the words and the doubt in them/)
+  expect(description).toMatch(/A remark stays a remark until the user makes it a requirement/)
+  expect(description).toMatch(/take out what the user lifted or what belonged to a finished task/)
+  expect(description).toMatch(/ask them to set out their requirements/)
+  expect(description).toMatch(/show them the list so they can correct it/)
+})
+
+test('the summary is told to keep how firmly the user said things', async ($, on) => {
+  const clock = mock.clock(on)
+  const world = engine(on, { now: 400_000 }, clock)
+  await start($)
+  world.writeFile(PLAN)
+
+  await $.tool.call({ tool: TOOL, records: [PLAN] })
+  await endTurn($, 't1')
+  await clock.settle()
+  expect(world.prompts[0]).toMatch(/a remark is not a requirement/)
+  expect(world.prompts[0]).toContain(`The list in ${PLAN} is the authority`)
 })
 
 // A compaction nobody prepared for still points at the last records.

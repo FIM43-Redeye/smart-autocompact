@@ -19,13 +19,21 @@ This mod changes the order: record first, then compact.
   refuses paths that don't exist or are empty. It also requires at least one
   of them to have changed in the last 30 minutes, so Claude can't hand over
   stale notes.
-- **Standing instructions, with a scope and an end.** A summary tends to drop
-  what you told Claude along the way ("don't touch the auth module", "ask
-  before pushing"). The procedure has Claude keep those as a list in the first
-  record: your words quoted, what each applies to, and when it ends. Claude
-  edits the list instead of rewriting it, and takes out what you lifted or
-  what belonged to a finished task, so an instruction meant for one task does
-  not follow the whole session.
+- **What you said, at the strength you said it.** A summary flattens what
+  you told Claude along the way: a requirement gets dropped, or a passing
+  remark hardens into a rule. The procedure has Claude keep a list in the
+  first record, in two parts, each entry with your words quoted:
+  - *Requirements*: what you set out as having to hold, or confirmed when
+    asked, with what each applies to and when it ends.
+  - *Remarks*: leanings and half-formed thoughts, kept with their doubt, and
+    Claude's reading marked as a reading. A remark stays a remark until you
+    make it a requirement. When the work turns on one, Claude asks you; when
+    you are away, it goes under open questions.
+
+  Claude edits the list instead of rewriting it, and takes out what you
+  lifted or what belonged to a finished task. Before you leave it to work on
+  its own, it asks you to set out your requirements if they are not clear;
+  when you are driving, it shows you the list before compacting.
 - **Compaction at the turn boundary.** When the turn ends, the mod runs
   `/compact` with summary instructions that name the record files.
 - **Then it keeps going.** A resume prompt follows every compaction: read the
