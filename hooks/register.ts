@@ -125,12 +125,24 @@ async function autoCompactThreshold($: EngineInterface): Promise<number | undefi
   return (await $.session.usage({ breakdown: 'summary' })).context.breakdown?.autoCompactThreshold
 }
 
+// An absolute path: POSIX `/...`, or on Windows `C:\...`, `C:/...` or a UNC
+// `\\server\share` path.
+const isAbsolute = (path: string) => /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(path)
+
+// On Windows a Git Bash path `/c/Users/...` names drive C; the engine would
+// otherwise read it as `C:\c\Users\...`, on the current drive.
+async function nativePaths($: EngineInterface, paths: string[]): Promise<string[]> {
+  const { platform } = await $.session.info()
+  if (platform !== 'windows') return paths
+  return paths.map((path) => path.replace(/^\/([A-Za-z])(?=\/|$)/, (_, drive: string) => `${drive.toUpperCase()}:`))
+}
+
 // Why these records can't be used yet, or undefined when they can.
 async function recordsProblem($: EngineInterface, paths: string[]): Promise<string | undefined> {
   const now = await $.clock.now()
   let isAnyFresh = false
   for (const path of paths) {
-    if (!path.startsWith('/')) return `records must be absolute paths, not "${path}".`
+    if (!isAbsolute(path)) return `records must be absolute paths, not "${path}".`
     const stat = await $.fs.stat(path).catch(() => undefined)
     if (stat === undefined || stat.kind !== 'file') return `${path} does not exist: record the state first.`
     if (stat.size === 0) return `${path} is empty: record the state first.`
@@ -190,9 +202,10 @@ export const register: Register = on => {
       return { deny: `${TOOL_NAME} is not for subagents. Ignore it and keep working on your task; your context compacts itself when it fills.` }
     }
     const input = e as unknown as Record<string, unknown>
-    const records = Array.isArray(input.records)
-      ? input.records.map(text).filter((r): r is string => r !== undefined)
-      : []
+    const records = await nativePaths(
+      $,
+      Array.isArray(input.records) ? input.records.map(text).filter((r): r is string => r !== undefined) : [],
+    )
     if (records.length === 0) {
       return { deny: `compact_context needs records: the files holding the state. ${PROCEDURE}` }
     }

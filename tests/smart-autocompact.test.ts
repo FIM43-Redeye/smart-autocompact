@@ -9,9 +9,19 @@ const MINUTE = 60_000
 
 type Engine$ = Parameters<Parameters<typeof test>[1]>[0]
 
+// One key per file however the engine spells its path: on Windows it hands
+// fs.stat `/home/u/plan.md` as `C:\home\u\plan.md`.
+const fileKey = (path: string) => path.replace(/\\/g, '/').replace(/^\/?[A-Za-z]:/, '')
+
 // The engine beneath the plugin: the usage it reports, the files on disk, and
 // the compactions and prompts it is asked for.
-function engine(on: On, tokens: { now: number }, clock: { now: () => number }, autoCompactAt = 600_000) {
+function engine(
+  on: On,
+  tokens: { now: number },
+  clock: { now: () => number },
+  autoCompactAt = 600_000,
+  platform: 'linux' | 'windows' = 'linux',
+) {
   const compactions: { instructions?: string }[] = []
   const prompts: string[] = []
   const files = new Map<string, { size: number; mtimeMs: number }>()
@@ -39,10 +49,11 @@ function engine(on: On, tokens: { now: number }, clock: { now: () => number }, a
     },
   }))
   on('fs.stat', (_, e) => {
-    const file = files.get(e.path)
+    const file = files.get(fileKey(e.path))
     if (file === undefined) throw new Error(`ENOENT: ${e.path}`)
     return { value: { kind: 'file' as const, isLink: false, ...file } }
   })
+  on('session.info', () => ({ value: { platform } }))
   on('tool.call', () => ({ result: 'ok' }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('session.compact', (_, e) => {
@@ -71,7 +82,7 @@ function engine(on: On, tokens: { now: number }, clock: { now: () => number }, a
     compactions,
     prompts,
     aborted,
-    writeFile: (path: string, size = 2_000) => files.set(path, { size, mtimeMs: clock.now() }),
+    writeFile: (path: string, size = 2_000) => files.set(fileKey(path), { size, mtimeMs: clock.now() }),
     stopTurn: () => {
       isTurnRunning = false
     },
@@ -164,6 +175,25 @@ test('the tool refuses until the state is recorded in real, fresh files', async 
   expect((await $.tool.call({ tool: TOOL, records: [PLAN] })).deny).toMatch(/30 minutes/)
   world.writeFile(MEMORY)
   expect((await $.tool.call({ tool: TOOL, records: [PLAN, MEMORY] })).deny).toBeUndefined()
+})
+
+test('on Windows the tool takes drive, UNC and Git Bash record paths', async ($, on) => {
+  const clock = mock.clock(on, { now: 100 * MINUTE })
+  const world = engine(on, { now: 300_000 }, clock, 600_000, 'windows')
+  await start($)
+  world.writeFile('C:/Users/u/project/plan.md')
+  world.writeFile('//server/share/notes.md')
+
+  for (const path of [
+    String.raw`C:\Users\u\project\plan.md`,
+    'C:/Users/u/project/plan.md',
+    String.raw`\\server\share\notes.md`,
+    '/c/Users/u/project/plan.md',
+  ]) {
+    expect((await $.tool.call({ tool: TOOL, records: [path] })).deny).toBeUndefined()
+  }
+  expect((await $.tool.call({ tool: TOOL, records: [String.raw`Users\u\project\plan.md`]})).deny).toMatch(/absolute/)
+  expect((await $.tool.call({ tool: TOOL, records: ['C:plan.md'] })).deny).toMatch(/absolute/)
 })
 
 test('the tool queues /compact naming the records, then the resume prompt', async ($, on) => {

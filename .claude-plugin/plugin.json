@@ -1,6 +1,6 @@
 {
   "name": "smart-autocompact",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Lets Claude write its state to files, then compact its own context and carry on; context-size notices from 300k tokens; main conversation only, silent to subagents",
   "author": { "name": "FIM43-Redeye" },
   "license": "MIT",
